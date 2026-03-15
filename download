@@ -1,0 +1,99 @@
+import { Router, Response } from "express";
+import { requireAuth, requireTokens, AuthRequest } from "../middleware/auth";
+import { uploadImage } from "../lib/cloudinary";
+import generationQueue from "../lib/queue";
+import prisma from "../lib/prisma";
+import crypto from "crypto";
+
+const router = Router();
+
+// POST /api/generate
+router.post("/", requireAuth, requireTokens, async (req: AuthRequest, res: Response) => {
+  try {
+    const { image, style, roomType, prompt, projectId } = req.body;
+    const userId = req.user!.id;
+
+    // Upload input image to Cloudinary if provided
+    let inputUrl: string | undefined;
+    if (image) {
+      inputUrl = await uploadImage(image, "lumara/inputs");
+    }
+
+    // Build dynamic prompt
+    const fullPrompt = prompt
+      ? `${prompt}, ultra realistic interior design, ${style} style ${roomType}, professional interior photography, realistic lighting, 8k, highly detailed`
+      : `ultra realistic interior design, ${style} style ${roomType}, professional interior photography, realistic lighting, ultra detailed, 8k, cozy atmosphere`;
+
+    // Decrement token immediately
+    await prisma.user.update({
+      where: { id: userId },
+      data: { tokens: { decrement: 1 } },
+    });
+
+    // Create a pending generation record
+    const shareToken = crypto.randomBytes(16).toString("hex");
+    const generation = await prisma.generation.create({
+      data: {
+        userId,
+        projectId: projectId || null,
+        prompt: fullPrompt,
+        style,
+        roomType,
+        inputUrl: inputUrl || null,
+        imageUrl: null,
+        shareToken,
+        isPublic: false,
+      },
+    });
+
+    // Add job to queue
+    const job = await generationQueue.add("generate", {
+      generationId: generation.id,
+      userId,
+      inputUrl,
+      fullPrompt,
+      style,
+      roomType,
+      projectId,
+    });
+
+    const updatedUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { tokens: true },
+    });
+
+    res.json({
+      success: true,
+      jobId: job.id,
+      generationId: generation.id,
+      tokensRemaining: updatedUser?.tokens,
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message || "Generation failed" });
+  }
+});
+
+// GET /api/generate/status/:jobId
+router.get("/status/:jobId", requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { generationQueue: queue } = await import("../lib/queue");
+    const job = await queue.getJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Job not found" });
+
+    const state = await job.getState();
+    const generation = await prisma.generation.findFirst({
+      where: { id: job.data.generationId, userId: req.user!.id },
+    });
+
+    res.json({
+      jobId: job.id,
+      state,
+      imageUrl: generation?.imageUrl || null,
+      generationId: generation?.id || null,
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+export default router;
