@@ -6,7 +6,11 @@
     "rootDir": "./src",
     "strict": false,
     "esModuleInterop": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "noImplicitAny": false,
+    "suppressImplicitAnyIndexErrors": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
