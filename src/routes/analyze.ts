@@ -1,12 +1,11 @@
-import { Router, Response } from 'express';
-import { requireAuth, AuthRequest } from '../middleware/auth';
+import { Router } from 'express';
+import { requireAuth } from '../middleware/auth';
 import Groq from 'groq-sdk';
 
 const router = Router();
-
 const getGroq = () => new Groq({ apiKey: process.env.GROQ_API_KEY! });
 
-router.post('/analyze-room', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/analyze-room', requireAuth, async (req: any, res: any) => {
   try {
     const { style, roomType } = req.body;
     if (!process.env.GROQ_API_KEY) return res.json({ suggestions: ['Add warm lighting', 'Introduce plants', 'Use a statement rug'] });
@@ -23,7 +22,7 @@ router.post('/analyze-room', requireAuth, async (req: AuthRequest, res: Response
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/improve-prompt', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/improve-prompt', requireAuth, async (req: any, res: any) => {
   try {
     const { prompt, style, roomType } = req.body;
     if (!prompt) return res.status(400).json({ error: 'Prompt required' });
@@ -40,7 +39,7 @@ router.post('/improve-prompt', requireAuth, async (req: AuthRequest, res: Respon
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/chat', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/chat', requireAuth, async (req: any, res: any) => {
   try {
     const { messages } = req.body;
     if (!process.env.GROQ_API_KEY) return res.json({ reply: 'Add GROQ_API_KEY to enable Lumara AI chat.' });
