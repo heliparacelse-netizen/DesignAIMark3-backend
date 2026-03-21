@@ -1,8 +1,6 @@
 import { Router } from 'express';
 import { requireAuth, requireTokens } from '../middleware/auth';
 import { User, Generation, Project } from '../models/index';
-import { v2 as cloudinary } from 'cloudinary';
-import Replicate from 'replicate';
 import crypto from 'crypto';
 
 const router = Router();
@@ -12,21 +10,25 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
     const { image, style, roomType, prompt, projectId } = req.body;
     const userId = req.user.id;
 
-    console.log(`[Generate] User ${userId} - Style: ${style} - Room: ${roomType}`);
+    const cloudinaryCloudName = process.env.CLOUDINARY_CLOUD_NAME;
+    const cloudinaryApiKey = process.env.CLOUDINARY_API_KEY;
+    const cloudinaryApiSecret = process.env.CLOUDINARY_API_SECRET;
+    const replicateToken = process.env.REPLICATE_API_TOKEN;
 
-    // Configure Cloudinary
-    cloudinary.config({
-      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-      api_key: process.env.CLOUDINARY_API_KEY,
-      api_secret: process.env.CLOUDINARY_API_SECRET,
-    });
+    console.log(`[Generate] cloudinary: ${cloudinaryCloudName} / replicate: ${replicateToken ? replicateToken.slice(0,5) : 'MISSING'}`);
 
-    console.log(`[Generate] Cloudinary cloud: ${process.env.CLOUDINARY_CLOUD_NAME}`);
-    console.log(`[Generate] Replicate token exists: ${!!process.env.REPLICATE_API_TOKEN}`);
+    if (!cloudinaryApiKey || !cloudinaryApiSecret || !cloudinaryCloudName) {
+      return res.status(500).json({ error: 'Cloudinary not configured' });
+    }
+    if (!replicateToken) {
+      return res.status(500).json({ error: 'Replicate API token not configured' });
+    }
+
+    const { v2: cloudinary } = await import('cloudinary');
+    cloudinary.config({ cloud_name: cloudinaryCloudName, api_key: cloudinaryApiKey, api_secret: cloudinaryApiSecret });
 
     let inputUrl: string | undefined;
     if (image) {
-      console.log(`[Generate] Uploading input image to Cloudinary...`);
       const uploaded: any = await cloudinary.uploader.upload(image, { folder: 'lumara/inputs' });
       inputUrl = uploaded.secure_url;
       console.log(`[Generate] Input uploaded: ${inputUrl}`);
@@ -37,7 +39,6 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
       : `ultra realistic interior design, ${style} style ${roomType}, professional interior photography, realistic lighting, 8k`;
 
     await User.findByIdAndUpdate(userId, { $inc: { tokens: -1 } });
-    console.log(`[Generate] Token decremented`);
 
     const shareToken = crypto.randomBytes(16).toString('hex');
     const generation: any = await Generation.create({
@@ -45,10 +46,10 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
       style, roomType, inputUrl, imageUrl: null, shareToken
     });
 
-    console.log(`[Generate] Generation record created: ${generation._id}`);
+    console.log(`[Generate] Generation created: ${generation._id}`);
 
-    // Run Replicate in background
-    const replicate = new Replicate({ auth: process.env.REPLICATE_API_TOKEN! });
+    const { default: Replicate } = await import('replicate');
+    const replicate = new Replicate({ auth: replicateToken });
 
     replicate.run(
       'adirik/interior-design:76604baddc85b1b4616e1c6475eca080da339c8875bd4996705440484a6eac38',
@@ -63,15 +64,15 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
         }
       }
     ).then(async (output: any) => {
-      console.log(`[Generate] Replicate output received`);
       const rawUrl = Array.isArray(output) ? output[0] : output;
+      console.log(`[Generate] Replicate done: ${rawUrl}`);
       const saved: any = await cloudinary.uploader.upload(rawUrl.toString(), { folder: 'lumara/generated' });
       await Generation.findByIdAndUpdate(generation._id, { imageUrl: saved.secure_url });
       if (!projectId) {
         const proj: any = await Project.create({ userId, name: `${style} ${roomType}`, style, roomType, coverUrl: saved.secure_url });
         await Generation.findByIdAndUpdate(generation._id, { projectId: proj._id });
       }
-      console.log(`[Generate] Done! Image: ${saved.secure_url}`);
+      console.log(`[Generate] Complete!`);
     }).catch(async (err: any) => {
       console.error(`[Generate] Replicate error:`, err.message);
       await User.findByIdAndUpdate(userId, { $inc: { tokens: 1 } });
@@ -82,7 +83,7 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
     res.json({ success: true, generationId: generation._id, tokensRemaining: updatedUser?.tokens });
 
   } catch (e: any) {
-    console.error(`[Generate] FATAL ERROR:`, e.message, e.stack);
+    console.error(`[Generate] FATAL:`, e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -93,9 +94,7 @@ router.get('/status/:id', requireAuth, async (req: any, res: any) => {
     if (!generation) return res.status(404).json({ error: 'Not found' });
     res.json({
       imageUrl: generation.imageUrl,
-      status: generation.imageUrl
-        ? (generation.imageUrl === 'ERROR' ? 'failed' : 'done')
-        : 'pending'
+      status: generation.imageUrl ? (generation.imageUrl === 'ERROR' ? 'failed' : 'done') : 'pending'
     });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
