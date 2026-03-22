@@ -10,19 +10,15 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
     const { image, style, roomType, prompt, projectId } = req.body;
     const userId = req.user.id;
 
+    const hfToken = process.env.HUGGINGFACE_API_TOKEN;
     const cloudinaryCloudName = process.env.CLOUDINARY_CLOUD_NAME;
     const cloudinaryApiKey = process.env.CLOUDINARY_API_KEY;
     const cloudinaryApiSecret = process.env.CLOUDINARY_API_SECRET;
-    const replicateToken = process.env.REPLICATE_API_TOKEN;
 
-    console.log(`[Generate] cloudinary: ${cloudinaryCloudName} / replicate: ${replicateToken ? replicateToken.slice(0,5) : 'MISSING'}`);
+    console.log(`[Generate] HF token: ${hfToken ? 'OK' : 'MISSING'} / Cloudinary: ${cloudinaryCloudName}`);
 
-    if (!cloudinaryApiKey || !cloudinaryApiSecret || !cloudinaryCloudName) {
-      return res.status(500).json({ error: 'Cloudinary not configured' });
-    }
-    if (!replicateToken) {
-      return res.status(500).json({ error: 'Replicate API token not configured' });
-    }
+    if (!hfToken) return res.status(500).json({ error: 'HuggingFace token not configured' });
+    if (!cloudinaryApiKey) return res.status(500).json({ error: 'Cloudinary not configured' });
 
     const { v2: cloudinary } = await import('cloudinary');
     cloudinary.config({ cloud_name: cloudinaryCloudName, api_key: cloudinaryApiKey, api_secret: cloudinaryApiSecret });
@@ -48,36 +44,57 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
 
     console.log(`[Generate] Generation created: ${generation._id}`);
 
-    const { default: Replicate } = await import('replicate');
-    const replicate = new Replicate({ auth: replicateToken });
+    // Generate with HuggingFace in background
+    const generateImage = async () => {
+      try {
+        console.log(`[Generate] Calling HuggingFace API...`);
+        const response = await fetch(
+          'https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0',
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${hfToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              inputs: fullPrompt,
+              parameters: {
+                negative_prompt: 'low quality, blurry, ugly, distorted, watermark',
+                num_inference_steps: 30,
+                guidance_scale: 7.5,
+                width: 1024,
+                height: 1024,
+              }
+            })
+          }
+        );
 
-    replicate.run(
-      'adirik/interior-design:76604baddc85b1b4616e1c6475eca080da339c8875bd4996705440484a6eac38',
-      {
-        input: {
-          image: inputUrl || 'https://images.unsplash.com/photo-1555041469-a586c61ea9bc?w=800',
-          prompt: fullPrompt,
-          negative_prompt: 'low quality, blurry, ugly, distorted',
-          guidance_scale: 15,
-          num_inference_steps: 50,
-          strength: 0.8
+        if (!response.ok) {
+          const error = await response.text();
+          throw new Error(`HuggingFace error: ${error}`);
         }
+
+        const imageBuffer = await response.arrayBuffer();
+        const base64 = Buffer.from(imageBuffer).toString('base64');
+        const dataUrl = `data:image/jpeg;base64,${base64}`;
+
+        const saved: any = await cloudinary.uploader.upload(dataUrl, { folder: 'lumara/generated' });
+        await Generation.findByIdAndUpdate(generation._id, { imageUrl: saved.secure_url });
+
+        if (!projectId) {
+          const proj: any = await Project.create({ userId, name: `${style} ${roomType}`, style, roomType, coverUrl: saved.secure_url });
+          await Generation.findByIdAndUpdate(generation._id, { projectId: proj._id });
+        }
+
+        console.log(`[Generate] Complete! Image: ${saved.secure_url}`);
+      } catch (err: any) {
+        console.error(`[Generate] Error:`, err.message);
+        await User.findByIdAndUpdate(userId, { $inc: { tokens: 1 } });
+        await Generation.findByIdAndUpdate(generation._id, { imageUrl: 'ERROR' });
       }
-    ).then(async (output: any) => {
-      const rawUrl = Array.isArray(output) ? output[0] : output;
-      console.log(`[Generate] Replicate done: ${rawUrl}`);
-      const saved: any = await cloudinary.uploader.upload(rawUrl.toString(), { folder: 'lumara/generated' });
-      await Generation.findByIdAndUpdate(generation._id, { imageUrl: saved.secure_url });
-      if (!projectId) {
-        const proj: any = await Project.create({ userId, name: `${style} ${roomType}`, style, roomType, coverUrl: saved.secure_url });
-        await Generation.findByIdAndUpdate(generation._id, { projectId: proj._id });
-      }
-      console.log(`[Generate] Complete!`);
-    }).catch(async (err: any) => {
-      console.error(`[Generate] Replicate error:`, err.message);
-      await User.findByIdAndUpdate(userId, { $inc: { tokens: 1 } });
-      await Generation.findByIdAndUpdate(generation._id, { imageUrl: 'ERROR' });
-    });
+    };
+
+    generateImage();
 
     const updatedUser: any = await User.findById(userId).lean();
     res.json({ success: true, generationId: generation._id, tokensRemaining: updatedUser?.tokens });
