@@ -8,31 +8,15 @@ cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: proc
 
 const router = Router();
 
-async function generateWithHuggingFace(imageBase64: string | null, prompt: string): Promise<Buffer> {
+async function generateWithHuggingFace(prompt: string): Promise<Buffer> {
   const HF_TOKEN = process.env.HF_API_TOKEN;
-
-  if (imageBase64) {
-    // Image-to-image avec instruct-pix2pix
-    const response = await fetch('https://router.huggingface.co/hf-inference/models/timbrooks/instruct-pix2pix', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${HF_TOKEN}`, 'Content-Type': 'application/json', 'x-wait-for-model': 'true' },
-      body: JSON.stringify({
-        inputs: imageBase64,
-        parameters: { prompt, negative_prompt: 'low quality, blurry, ugly, distorted', num_inference_steps: 20, guidance_scale: 7.5, image_guidance_scale: 1.5 }
-      })
-    });
-    if (!response.ok) throw new Error(`HuggingFace error: ${await response.text()}`);
-    return Buffer.from(await response.arrayBuffer());
-  } else {
-    // Text-to-image avec FLUX schnell (gratuit)
-    const response = await fetch('https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${HF_TOKEN}`, 'Content-Type': 'application/json', 'x-wait-for-model': 'true' },
-      body: JSON.stringify({ inputs: prompt })
-    });
-    if (!response.ok) throw new Error(`HuggingFace error: ${await response.text()}`);
-    return Buffer.from(await response.arrayBuffer());
-  }
+  const response = await fetch('https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${HF_TOKEN}`, 'Content-Type': 'application/json', 'x-wait-for-model': 'true' },
+    body: JSON.stringify({ inputs: prompt })
+  });
+  if (!response.ok) throw new Error(`HuggingFace error: ${await response.text()}`);
+  return Buffer.from(await response.arrayBuffer());
 }
 
 router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
@@ -61,17 +45,14 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
 
     const generateImage = async () => {
       try {
-        console.log(`[Generate] Calling HuggingFace API...`);
-        const base64Data = image ? image.replace(/^data:image\/\w+;base64,/, '') : null;
-        const imageBuffer = await generateWithHuggingFace(base64Data, fullPrompt);
-
+        console.log(`[Generate] Calling HuggingFace FLUX.1-schnell...`);
+        const imageBuffer = await generateWithHuggingFace(fullPrompt);
         const uploadResult: any = await new Promise((resolve, reject) => {
           cloudinary.uploader.upload_stream(
             { folder: 'lumara/generated', transformation: [{ quality: 'auto', fetch_format: 'auto', width: 1024, crop: 'limit' }] },
             (err, result) => err ? reject(err) : resolve(result)
           ).end(imageBuffer);
         });
-
         await Generation.findByIdAndUpdate(generation._id, { imageUrl: uploadResult.secure_url });
         if (!projectId) {
           const proj: any = await Project.create({ userId, name: `${style} ${roomType}`, style, roomType, coverUrl: uploadResult.secure_url });
