@@ -1,27 +1,48 @@
 import { Router } from 'express';
 import { requireAuth, requireTokens } from '../middleware/auth';
 import { User, Generation, Project } from '../models/index';
+import { v2 as cloudinary } from 'cloudinary';
 import crypto from 'crypto';
 
+cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, api_secret: process.env.CLOUDINARY_API_SECRET });
+
 const router = Router();
+
+const HF_API_URL = 'https://api-inference.huggingface.co/models/lllyasviel/sd-controlnet-mlsd';
+
+async function queryHuggingFace(imageBase64: string, prompt: string): Promise<Buffer> {
+  const response = await fetch(HF_API_URL, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.HF_API_TOKEN}`,
+      'Content-Type': 'application/json',
+      'X-Wait-For-Model': 'true',
+    },
+    body: JSON.stringify({
+      inputs: prompt,
+      parameters: {
+        image: imageBase64,
+        negative_prompt: 'low quality, blurry, ugly, distorted, watermark',
+        num_inference_steps: 30,
+        guidance_scale: 7.5,
+        strength: 0.8,
+      }
+    })
+  });
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`HuggingFace error: ${err}`);
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
 
 router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
   try {
     const { image, style, roomType, prompt, projectId } = req.body;
     const userId = req.user.id;
 
-    const falKey = process.env.FAL_API_KEY;
-    const cloudinaryCloudName = process.env.CLOUDINARY_CLOUD_NAME;
-    const cloudinaryApiKey = process.env.CLOUDINARY_API_KEY;
-    const cloudinaryApiSecret = process.env.CLOUDINARY_API_SECRET;
-
-    console.log(`[Generate] fal: ${falKey ? 'OK' : 'MISSING'} / Cloudinary: ${cloudinaryCloudName}`);
-
-    if (!falKey) return res.status(500).json({ error: 'FAL API key not configured' });
-    if (!cloudinaryApiKey) return res.status(500).json({ error: 'Cloudinary not configured' });
-
-    const { v2: cloudinary } = await import('cloudinary');
-    cloudinary.config({ cloud_name: cloudinaryCloudName, api_key: cloudinaryApiKey, api_secret: cloudinaryApiSecret });
+    if (!process.env.HF_API_TOKEN) return res.status(500).json({ error: 'HuggingFace API token not configured' });
+    if (!process.env.CLOUDINARY_API_KEY) return res.status(500).json({ error: 'Cloudinary not configured' });
 
     let inputUrl: string | undefined;
     if (image) {
@@ -46,61 +67,33 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
 
     const generateImage = async () => {
       try {
-        console.log(`[Generate] Calling fal.ai API...`);
+        console.log(`[Generate] Calling HuggingFace API...`);
 
-        let result: any;
+        let imageBuffer: Buffer;
 
-        if (inputUrl) {
-          // Image-to-image: really redesign the uploaded room
-          const response = await fetch('https://fal.run/fal-ai/flux/dev/image-to-image', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Key ${falKey}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              image_url: inputUrl,
-              prompt: fullPrompt,
-              negative_prompt: 'low quality, blurry, ugly, distorted, watermark',
-              strength: 0.85,
-              num_inference_steps: 28,
-              guidance_scale: 3.5,
-              num_images: 1,
-            })
-          });
-          const data: any = await response.json();
-          if (!response.ok) throw new Error(JSON.stringify(data));
-          result = data.images?.[0]?.url;
+        if (image) {
+          const base64Data = image.replace(/^data:image\/\w+;base64,/, '');
+          imageBuffer = await queryHuggingFace(base64Data, fullPrompt);
         } else {
-          // Text-to-image
-          const response = await fetch('https://fal.run/fal-ai/flux/dev', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Key ${falKey}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              prompt: fullPrompt,
-              negative_prompt: 'low quality, blurry, ugly, distorted, watermark, people',
-              num_inference_steps: 28,
-              guidance_scale: 3.5,
-              num_images: 1,
-              image_size: 'landscape_4_3',
-            })
-          });
-          const data: any = await response.json();
-          if (!response.ok) throw new Error(JSON.stringify(data));
-          result = data.images?.[0]?.url;
+          const fallbackResponse = await fetch('https://images.unsplash.com/photo-1555041469-a586c61ea9bc?w=800');
+          const fallbackBuffer = Buffer.from(await fallbackResponse.arrayBuffer());
+          const base64Fallback = fallbackBuffer.toString('base64');
+          imageBuffer = await queryHuggingFace(base64Fallback, fullPrompt);
         }
 
-        if (!result) throw new Error('No image returned from fal.ai');
-        console.log(`[Generate] fal.ai done: ${result}`);
+        console.log(`[Generate] HuggingFace done, uploading to Cloudinary...`);
 
-        const saved: any = await cloudinary.uploader.upload(result, { folder: 'lumara/generated' });
-        await Generation.findByIdAndUpdate(generation._id, { imageUrl: saved.secure_url });
+        const uploadResult: any = await new Promise((resolve, reject) => {
+          cloudinary.uploader.upload_stream(
+            { folder: 'lumara/generated', transformation: [{ quality: 'auto', fetch_format: 'auto', width: 1024, crop: 'limit' }] },
+            (err, result) => err ? reject(err) : resolve(result)
+          ).end(imageBuffer);
+        });
+
+        await Generation.findByIdAndUpdate(generation._id, { imageUrl: uploadResult.secure_url });
 
         if (!projectId) {
-          const proj: any = await Project.create({ userId, name: `${style} ${roomType}`, style, roomType, coverUrl: saved.secure_url });
+          const proj: any = await Project.create({ userId, name: `${style} ${roomType}`, style, roomType, coverUrl: uploadResult.secure_url });
           await Generation.findByIdAndUpdate(generation._id, { projectId: proj._id });
         }
         console.log(`[Generate] Complete!`);

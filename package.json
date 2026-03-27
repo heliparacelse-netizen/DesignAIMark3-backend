@@ -16,7 +16,6 @@
     "groq-sdk": "^0.3.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.0.0",
-    "replicate": "^0.25.2",
     "stripe": "^14.14.0"
   },
   "devDependencies": {
