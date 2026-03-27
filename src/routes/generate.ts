@@ -10,14 +10,14 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
     const { image, style, roomType, prompt, projectId } = req.body;
     const userId = req.user.id;
 
-    const hfToken = process.env.HUGGINGFACE_API_TOKEN;
+    const falKey = process.env.FAL_API_KEY;
     const cloudinaryCloudName = process.env.CLOUDINARY_CLOUD_NAME;
     const cloudinaryApiKey = process.env.CLOUDINARY_API_KEY;
     const cloudinaryApiSecret = process.env.CLOUDINARY_API_SECRET;
 
-    console.log(`[Generate] HF token: ${hfToken ? 'OK' : 'MISSING'} / Cloudinary: ${cloudinaryCloudName}`);
+    console.log(`[Generate] fal: ${falKey ? 'OK' : 'MISSING'} / Cloudinary: ${cloudinaryCloudName}`);
 
-    if (!hfToken) return res.status(500).json({ error: 'HuggingFace token not configured' });
+    if (!falKey) return res.status(500).json({ error: 'FAL API key not configured' });
     if (!cloudinaryApiKey) return res.status(500).json({ error: 'Cloudinary not configured' });
 
     const { v2: cloudinary } = await import('cloudinary');
@@ -44,49 +44,66 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
 
     console.log(`[Generate] Generation created: ${generation._id}`);
 
-    // Generate with HuggingFace in background
     const generateImage = async () => {
       try {
-        console.log(`[Generate] Calling HuggingFace API...`);
-        const response = await fetch(
-          'https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0',
-          {
+        console.log(`[Generate] Calling fal.ai API...`);
+
+        let result: any;
+
+        if (inputUrl) {
+          // Image-to-image: really redesign the uploaded room
+          const response = await fetch('https://fal.run/fal-ai/flux/dev/image-to-image', {
             method: 'POST',
             headers: {
-              'Authorization': `Bearer ${hfToken}`,
+              'Authorization': `Key ${falKey}`,
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              inputs: fullPrompt,
-              parameters: {
-                negative_prompt: 'low quality, blurry, ugly, distorted, watermark',
-                num_inference_steps: 30,
-                guidance_scale: 7.5,
-                width: 1024,
-                height: 1024,
-              }
+              image_url: inputUrl,
+              prompt: fullPrompt,
+              negative_prompt: 'low quality, blurry, ugly, distorted, watermark',
+              strength: 0.85,
+              num_inference_steps: 28,
+              guidance_scale: 3.5,
+              num_images: 1,
             })
-          }
-        );
-
-        if (!response.ok) {
-          const error = await response.text();
-          throw new Error(`HuggingFace error: ${error}`);
+          });
+          const data: any = await response.json();
+          if (!response.ok) throw new Error(JSON.stringify(data));
+          result = data.images?.[0]?.url;
+        } else {
+          // Text-to-image
+          const response = await fetch('https://fal.run/fal-ai/flux/dev', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Key ${falKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              prompt: fullPrompt,
+              negative_prompt: 'low quality, blurry, ugly, distorted, watermark, people',
+              num_inference_steps: 28,
+              guidance_scale: 3.5,
+              num_images: 1,
+              image_size: 'landscape_4_3',
+            })
+          });
+          const data: any = await response.json();
+          if (!response.ok) throw new Error(JSON.stringify(data));
+          result = data.images?.[0]?.url;
         }
 
-        const imageBuffer = await response.arrayBuffer();
-        const base64 = Buffer.from(imageBuffer).toString('base64');
-        const dataUrl = `data:image/jpeg;base64,${base64}`;
+        if (!result) throw new Error('No image returned from fal.ai');
+        console.log(`[Generate] fal.ai done: ${result}`);
 
-        const saved: any = await cloudinary.uploader.upload(dataUrl, { folder: 'lumara/generated' });
+        const saved: any = await cloudinary.uploader.upload(result, { folder: 'lumara/generated' });
         await Generation.findByIdAndUpdate(generation._id, { imageUrl: saved.secure_url });
 
         if (!projectId) {
           const proj: any = await Project.create({ userId, name: `${style} ${roomType}`, style, roomType, coverUrl: saved.secure_url });
           await Generation.findByIdAndUpdate(generation._id, { projectId: proj._id });
         }
-
-        console.log(`[Generate] Complete! Image: ${saved.secure_url}`);
+        console.log(`[Generate] Complete!`);
       } catch (err: any) {
         console.error(`[Generate] Error:`, err.message);
         await User.findByIdAndUpdate(userId, { $inc: { tokens: 1 } });
