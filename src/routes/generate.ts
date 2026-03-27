@@ -8,7 +8,7 @@ cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: proc
 
 const router = Router();
 
-const HF_API_URL = 'https://api-inference.huggingface.co/models/lllyasviel/sd-controlnet-mlsd';
+const HF_API_URL = 'https://router.huggingface.co/hf-inference/models/lllyasviel/sd-controlnet-mlsd';
 
 async function queryHuggingFace(imageBase64: string, prompt: string): Promise<Buffer> {
   const response = await fetch(HF_API_URL, {
