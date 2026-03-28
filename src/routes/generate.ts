@@ -6,50 +6,77 @@ import crypto from 'crypto';
 
 cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, api_secret: process.env.CLOUDINARY_API_SECRET });
 
+const router = Router();
+
 async function generateWithStability(imageBase64: string | null, prompt: string): Promise<Buffer> {
   const apiKey = process.env.STABILITY_API_KEY;
   if (!apiKey) throw new Error('STABILITY_API_KEY not configured');
 
-  const { default: FormData } = await import('form-data');
-  const formData = new FormData();
+  console.log(`[Stability] Starting generation, hasImage: ${!!imageBase64}`);
+
+  const boundary = '----FormBoundary' + crypto.randomBytes(8).toString('hex');
+  const parts: Buffer[] = [];
+
+  const addField = (name: string, value: string) => {
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
+  };
+
+  const addFile = (name: string, filename: string, contentType: string, data: Buffer) => {
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${filename}"\r\nContent-Type: ${contentType}\r\n\r\n`));
+    parts.push(data);
+    parts.push(Buffer.from('\r\n'));
+  };
 
   if (imageBase64) {
     const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
     const imageBuffer = Buffer.from(base64Data, 'base64');
-    formData.append('image', imageBuffer, { filename: 'room.png', contentType: 'image/png' });
-    formData.append('mode', 'image-to-image');
-    formData.append('strength', '0.75');
+    addFile('image', 'room.png', 'image/png', imageBuffer);
+    addField('mode', 'image-to-image');
+    addField('strength', '0.75');
   }
 
-  formData.append('prompt', prompt);
-  formData.append('negative_prompt', 'low quality, blurry, ugly, distorted, watermark, people');
-  formData.append('output_format', 'png');
+  addField('prompt', prompt);
+  addField('negative_prompt', 'low quality, blurry, ugly, distorted, watermark, people');
+  addField('output_format', 'png');
+  parts.push(Buffer.from(`--${boundary}--\r\n`));
+
+  const body = Buffer.concat(parts);
 
   const response = await fetch('https://api.stability.ai/v2beta/stable-image/generate/sd3', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Accept': 'image/*',
-      ...formData.getHeaders()
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      'Content-Length': String(body.length),
     },
-    body: formData.getBuffer() as unknown as BodyInit
+    body
   });
+
+  console.log(`[Stability] Response status: ${response.status}`);
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`Stability AI error: ${errText}`);
+    console.error(`[Stability] Error response:`, errText);
+    throw new Error(`Stability AI error ${response.status}: ${errText}`);
   }
+
   return Buffer.from(await response.arrayBuffer());
 }
 
-const router = Router();
+const router2 = Router();
 
-router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
+router2.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
   try {
     const { image, style, roomType, prompt, projectId } = req.body;
     const userId = req.user.id;
 
-    if (!process.env.STABILITY_API_KEY) return res.status(500).json({ error: 'Stability AI API key not configured' });
+    console.log(`[Generate] Request received - style: ${style}, room: ${roomType}, hasImage: ${!!image}`);
+
+    if (!process.env.STABILITY_API_KEY) {
+      console.error('[Generate] STABILITY_API_KEY missing!');
+      return res.status(500).json({ error: 'Stability AI API key not configured' });
+    }
 
     let inputUrl: string | undefined;
     if (image) {
@@ -62,6 +89,8 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
       ? `${prompt}, ultra realistic interior design, ${style} style ${roomType}, professional photography, 8k`
       : `ultra realistic interior design, ${style} style ${roomType}, professional interior photography, realistic lighting, 8k`;
 
+    console.log(`[Generate] Prompt: ${fullPrompt.slice(0, 80)}...`);
+
     await User.findByIdAndUpdate(userId, { $inc: { tokens: -1 } });
     const shareToken = crypto.randomBytes(16).toString('hex');
     const generation: any = await Generation.create({
@@ -70,39 +99,37 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
     });
     console.log(`[Generate] Generation created: ${generation._id}`);
 
-    const generateImage = async () => {
-      try {
-        console.log(`[Generate] Calling Stability AI...`);
-        const imageBuffer = await generateWithStability(image || null, fullPrompt);
-
-        const uploadResult: any = await new Promise((resolve, reject) => {
-          cloudinary.uploader.upload_stream(
-            { folder: 'lumara/generated' },
-            (err, result) => err ? reject(err) : resolve(result)
-          ).end(imageBuffer);
-        });
-
-        await Generation.findByIdAndUpdate(generation._id, { imageUrl: uploadResult.secure_url });
-
-        if (!projectId) {
-          const proj: any = await Project.create({
-            userId, name: `${style} ${roomType}`,
-            style, roomType, coverUrl: uploadResult.secure_url
-          });
-          await Generation.findByIdAndUpdate(generation._id, { projectId: proj._id });
-        }
-        console.log(`[Generate] Complete! ${uploadResult.secure_url}`);
-      } catch (err: any) {
-        console.error(`[Generate] Error:`, err.message);
-        await User.findByIdAndUpdate(userId, { $inc: { tokens: 1 } });
-        await Generation.findByIdAndUpdate(generation._id, { imageUrl: 'ERROR' });
-      }
-    };
-
-    generateImage();
-
+    // Respond immediately then generate in background
     const updatedUser: any = await User.findById(userId).lean();
-    res.json({ success: true, generationId: generation._id, tokensRemaining: (updatedUser as any)?.tokens });
+    res.json({ success: true, generationId: generation._id, tokensRemaining: updatedUser?.tokens });
+
+    // Background generation
+    try {
+      console.log(`[Generate] Starting Stability AI call...`);
+      const imageBuffer = await generateWithStability(image || null, fullPrompt);
+      console.log(`[Generate] Got image buffer, size: ${imageBuffer.length} bytes`);
+
+      const uploadResult: any = await new Promise((resolve, reject) => {
+        cloudinary.uploader.upload_stream(
+          { folder: 'lumara/generated' },
+          (err, result) => err ? reject(err) : resolve(result)
+        ).end(imageBuffer);
+      });
+
+      await Generation.findByIdAndUpdate(generation._id, { imageUrl: uploadResult.secure_url });
+
+      if (!projectId) {
+        const proj: any = await Project.create({
+          userId, name: `${style} ${roomType}`, style, roomType, coverUrl: uploadResult.secure_url
+        });
+        await Generation.findByIdAndUpdate(generation._id, { projectId: proj._id });
+      }
+      console.log(`[Generate] Complete! ${uploadResult.secure_url}`);
+    } catch (err: any) {
+      console.error(`[Generate] Background error:`, err.message);
+      await User.findByIdAndUpdate(userId, { $inc: { tokens: 1 } });
+      await Generation.findByIdAndUpdate(generation._id, { imageUrl: 'ERROR' });
+    }
 
   } catch (e: any) {
     console.error(`[Generate] FATAL:`, e.message);
@@ -110,7 +137,7 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
   }
 });
 
-router.get('/status/:id', requireAuth, async (req: any, res: any) => {
+router2.get('/status/:id', requireAuth, async (req: any, res: any) => {
   try {
     const generation: any = await Generation.findOne({ _id: req.params.id, userId: req.user.id }).lean();
     if (!generation) return res.status(404).json({ error: 'Not found' });
@@ -123,4 +150,4 @@ router.get('/status/:id', requireAuth, async (req: any, res: any) => {
   }
 });
 
-export default router;
+export default router2;
