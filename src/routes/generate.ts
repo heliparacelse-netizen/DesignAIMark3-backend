@@ -3,20 +3,51 @@ import { requireAuth, requireTokens } from '../middleware/auth';
 import { User, Generation, Project } from '../models/index';
 import { v2 as cloudinary } from 'cloudinary';
 import crypto from 'crypto';
+import FormData from 'form-data';
 
 cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, api_secret: process.env.CLOUDINARY_API_SECRET });
 
 const router = Router();
 
-async function generateWithHuggingFace(prompt: string): Promise<Buffer> {
-  const HF_TOKEN = process.env.HF_API_TOKEN;
-  const response = await fetch('https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${HF_TOKEN}`, 'Content-Type': 'application/json', 'x-wait-for-model': 'true' },
-    body: JSON.stringify({ inputs: prompt })
-  });
-  if (!response.ok) throw new Error(`HuggingFace error: ${await response.text()}`);
-  return Buffer.from(await response.arrayBuffer());
+async function generateWithStability(imageBase64: string | null, prompt: string): Promise<Buffer> {
+  const apiKey = process.env.STABILITY_API_KEY;
+
+  if (imageBase64) {
+    // Image-to-image : modifie la pièce uploadée
+    const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+    const imageBuffer = Buffer.from(base64Data, 'base64');
+
+    const formData = new FormData();
+    formData.append('image', imageBuffer, { filename: 'room.png', contentType: 'image/png' });
+    formData.append('prompt', prompt);
+    formData.append('negative_prompt', 'low quality, blurry, ugly, distorted, watermark, people');
+    formData.append('strength', '0.75');
+    formData.append('output_format', 'png');
+
+    const response = await fetch('https://api.stability.ai/v2beta/stable-image/generate/sd3', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Accept': 'image/*', ...formData.getHeaders() },
+      body: formData as any
+    });
+
+    if (!response.ok) throw new Error(`Stability AI error: ${await response.text()}`);
+    return Buffer.from(await response.arrayBuffer());
+  } else {
+    // Text-to-image
+    const formData = new FormData();
+    formData.append('prompt', prompt);
+    formData.append('negative_prompt', 'low quality, blurry, ugly, distorted, watermark, people');
+    formData.append('output_format', 'png');
+
+    const response = await fetch('https://api.stability.ai/v2beta/stable-image/generate/sd3', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Accept': 'image/*', ...formData.getHeaders() },
+      body: formData as any
+    });
+
+    if (!response.ok) throw new Error(`Stability AI error: ${await response.text()}`);
+    return Buffer.from(await response.arrayBuffer());
+  }
 }
 
 router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
@@ -24,8 +55,7 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
     const { image, style, roomType, prompt, projectId } = req.body;
     const userId = req.user.id;
 
-    if (!process.env.HF_API_TOKEN) return res.status(500).json({ error: 'HuggingFace API token not configured' });
-    if (!process.env.CLOUDINARY_API_KEY) return res.status(500).json({ error: 'Cloudinary not configured' });
+    if (!process.env.STABILITY_API_KEY) return res.status(500).json({ error: 'Stability AI API key not configured' });
 
     let inputUrl: string | undefined;
     if (image) {
@@ -45,14 +75,16 @@ router.post('/', requireAuth, requireTokens, async (req: any, res: any) => {
 
     const generateImage = async () => {
       try {
-        console.log(`[Generate] Calling HuggingFace FLUX.1-schnell...`);
-        const imageBuffer = await generateWithHuggingFace(fullPrompt);
+        console.log(`[Generate] Calling Stability AI...`);
+        const imageBuffer = await generateWithStability(image || null, fullPrompt);
+
         const uploadResult: any = await new Promise((resolve, reject) => {
           cloudinary.uploader.upload_stream(
             { folder: 'lumara/generated', transformation: [{ quality: 'auto', fetch_format: 'auto', width: 1024, crop: 'limit' }] },
             (err, result) => err ? reject(err) : resolve(result)
           ).end(imageBuffer);
         });
+
         await Generation.findByIdAndUpdate(generation._id, { imageUrl: uploadResult.secure_url });
         if (!projectId) {
           const proj: any = await Project.create({ userId, name: `${style} ${roomType}`, style, roomType, coverUrl: uploadResult.secure_url });
