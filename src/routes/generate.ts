@@ -10,62 +10,36 @@ async function generateWithStability(imageBase64: string | null, prompt: string)
   const apiKey = process.env.STABILITY_API_KEY;
   if (!apiKey) throw new Error('STABILITY_API_KEY not configured');
 
+  const { default: FormData } = await import('form-data');
+  const formData = new FormData();
+
   if (imageBase64) {
     const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
     const imageBuffer = Buffer.from(base64Data, 'base64');
-
-    const { default: FormData } = await import('form-data');
-    const formData = new FormData();
     formData.append('image', imageBuffer, { filename: 'room.png', contentType: 'image/png' });
-    formData.append('prompt', prompt);
-    formData.append('negative_prompt', 'low quality, blurry, ugly, distorted, watermark, people');
-    formData.append('strength', '0.75');
-    formData.append('output_format', 'png');
     formData.append('mode', 'image-to-image');
-
-    const headers = {
-      'Authorization': `Bearer ${apiKey}`,
-      'Accept': 'image/*',
-      ...formData.getHeaders()
-    };
-
-    const response = await fetch('https://api.stability.ai/v2beta/stable-image/generate/sd3', {
-      method: 'POST',
-      headers,
-      body: formData.getBuffer()
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Stability AI error: ${errText}`);
-    }
-    return Buffer.from(await response.arrayBuffer());
-
-  } else {
-    const { default: FormData } = await import('form-data');
-    const formData = new FormData();
-    formData.append('prompt', prompt);
-    formData.append('negative_prompt', 'low quality, blurry, ugly, distorted, watermark, people');
-    formData.append('output_format', 'png');
-
-    const headers = {
-      'Authorization': `Bearer ${apiKey}`,
-      'Accept': 'image/*',
-      ...formData.getHeaders()
-    };
-
-    const response = await fetch('https://api.stability.ai/v2beta/stable-image/generate/sd3', {
-      method: 'POST',
-      headers,
-      body: formData.getBuffer()
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Stability AI error: ${errText}`);
-    }
-    return Buffer.from(await response.arrayBuffer());
+    formData.append('strength', '0.75');
   }
+
+  formData.append('prompt', prompt);
+  formData.append('negative_prompt', 'low quality, blurry, ugly, distorted, watermark, people');
+  formData.append('output_format', 'png');
+
+  const response = await fetch('https://api.stability.ai/v2beta/stable-image/generate/sd3', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Accept': 'image/*',
+      ...formData.getHeaders()
+    },
+    body: formData.getBuffer() as unknown as BodyInit
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Stability AI error: ${errText}`);
+  }
+  return Buffer.from(await response.arrayBuffer());
 }
 
 const router = Router();
