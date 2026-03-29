@@ -6,34 +6,25 @@ const router = Router();
 router.post('/', requireAuth, async (req: any, res: any) => {
   try {
     const { messages } = req.body;
-    console.log('[Chat] Request received, messages:', messages?.length);
-
+    console.log('[Roomvera Chat] Request received');
     const groqKey = process.env.GROQ_API_KEY;
-    if (!groqKey) {
-      return res.json({ reply: 'AI temporarily waking up (Render cold start). Please try again in a moment.' });
-    }
-
+    if (!groqKey) return res.json({ reply: 'AI temporarily waking up (Render cold start). Please try again in 30 seconds.' });
     const { default: Groq } = await import('groq-sdk');
     const groq = new Groq({ apiKey: groqKey });
-
     const response = await groq.chat.completions.create({
-      model: 'llama3-70b-8192',
+      model: 'llama-3.3-70b-versatile',
       max_tokens: 500,
       messages: [
-        {
-          role: 'system',
-          content: 'You are Roomvera AI, an expert interior design assistant. Help users with room analysis, furniture suggestions, design prompts, style advice, and decoration trends. Be concise, practical, and inspiring. Always relate to interior design.'
-        },
+        { role: 'system', content: 'You are Roomvera AI, an expert interior design assistant. Help users with room redesign, furniture suggestions, style advice, and prompt improvement. Be concise, practical, and inspiring.' },
         ...messages
       ]
     });
-
     const reply = response.choices[0]?.message?.content || 'Please try again.';
-    console.log('[Chat] Response sent, length:', reply.length);
+    console.log('[Roomvera Chat] Response sent');
     res.json({ reply });
   } catch (e: any) {
-    console.error('[Chat] Error:', e.message);
-    res.json({ reply: 'AI temporarily waking up (Render cold start). Please try again in a moment.' });
+    console.error('[Roomvera Chat] Error:', e.message);
+    res.json({ reply: 'AI temporarily waking up (Render cold start). Please try again in 30 seconds.' });
   }
 });
 
