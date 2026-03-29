@@ -5,7 +5,7 @@ const UserSchema = new mongoose.Schema({
   password: { type: String, required: true },
   name: String,
   plan: { type: String, default: 'free' },
-  tokens: { type: Number, default: 3 },
+  tokens: { type: Number, default: 100 },
   stripeId: String,
 }, { timestamps: true });
 

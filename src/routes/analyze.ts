@@ -45,13 +45,13 @@ router.post('/chat', requireAuth, async (req: any, res: any) => {
   try {
     const { messages } = req.body;
     const groqKey = process.env.GROQ_API_KEY;
-    if (!groqKey) return res.json({ reply: 'Add GROQ_API_KEY to enable Lumara AI chat.' });
+    if (!groqKey) return res.json({ reply: 'Add GROQ_API_KEY to enable Roomvera AI chat.' });
     const { default: Groq } = await import('groq-sdk');
     const groq = new Groq({ apiKey: groqKey });
     const response = await groq.chat.completions.create({
       model: 'llama3-8b-8192', max_tokens: 400,
       messages: [
-        { role: 'system', content: 'You are Lumara AI, an expert interior design assistant. Be concise and inspiring.' },
+        { role: 'system', content: 'You are Roomvera AI, an expert interior design assistant. Be concise and inspiring.' },
         ...messages
       ]
     });
